@@ -685,9 +685,10 @@ Feature: Agent identity and delegated API authorization
 
   @journey:direct-agent-permission @entrypoint:restish @proof:unit
   Scenario: A controller grants an Agent permission before its first request
-    Given an active Agent and a Resource Context within its controller's authority
-    When the controller directly grants a persistent permission
-    Then Realmroot stores the permission without creating an access request
+    Given an active Agent and a Resource within its controller's authority
+    When the controller posts the resource URL, scopes, and a persistent lifetime
+    Then Realmroot resolves the controller's connection and authorization Contexts internally
+    And Realmroot stores the permissions without creating an access request
     And repeated grants reuse the existing permission
     And a later Agent request reuses that permission without human approval
     And scopes outside the controller or connected account boundary are rejected

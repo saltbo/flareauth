@@ -33,7 +33,6 @@ import {
   listAccountProviderConnectors,
   listAgentResourceServers as listAgentApiResources,
   listAgentResourceServerAuthorizationDetails as listAgentAuthorizationDetailCatalog,
-  listAgentPermissionContexts,
   listAgentPermissions,
   listApiResources,
   listConnectableExternalResources,
@@ -74,6 +73,7 @@ describe('external API resource authorization', () => {
   it('[spec: agent-identity/direct-agent-permission] grants before any request and reuses the grant on first Agent access', async () => {
     const deps = createTestDeps()
     authorizationDeps(deps)
+    vi.mocked(deps.authorization.findResourceByResourceUrl).mockResolvedValue(resource())
     vi.mocked(deps.agentIdentities.findIdentity).mockResolvedValue(identityAggregate())
     vi.mocked(deps.externalResources.findConnectionByOwnerResource).mockResolvedValue(connectionRecord())
     vi.mocked(deps.externalResources.findConnection).mockResolvedValue(connectionRecord())
@@ -83,15 +83,14 @@ describe('external API resource authorization', () => {
       saved ? [saved] : [],
     )
     const input = {
-      resourceServerId: 'resource-1',
-      scope: 'projects:read',
-      authorizationDetails: [],
+      resource: resource().resourceUrl,
+      scopes: ['projects:read'],
       mode: 'persistent' as const,
     }
-    const permission = await createAgentPermission(deps, 'identity-1', input, 'user-1')
+    const [permission] = await createAgentPermission(deps, 'identity-1', input, 'user-1')
     expect(permission).toMatchObject({ scope: 'projects:read', mode: 'persistent', sourceAccessRequestId: null })
     expect(deps.externalResources.createAccessRequest).not.toHaveBeenCalled()
-    expect((await createAgentPermission(deps, 'identity-1', input, 'user-1')).id).toBe(permission.id)
+    expect((await createAgentPermission(deps, 'identity-1', input, 'user-1'))[0]?.id).toBe(permission!.id)
     vi.mocked(deps.externalResources.createAccessRequest).mockImplementation(async (record) => record)
     const request = await createAgentAccessRequest(
       deps,
@@ -106,14 +105,14 @@ describe('external API resource authorization', () => {
   it('[spec: agent-identity/direct-agent-permission] rejects another controller and scopes outside the account', async () => {
     const deps = createTestDeps()
     authorizationDeps(deps)
+    vi.mocked(deps.authorization.findResourceByResourceUrl).mockResolvedValue(resource())
     vi.mocked(deps.agentIdentities.findIdentity).mockResolvedValue(identityAggregate())
     vi.mocked(deps.externalResources.findConnectionByOwnerResource).mockResolvedValue(connectionRecord())
     vi.mocked(deps.externalResources.findConnection).mockResolvedValue(connectionRecord())
     deps.authorization.createScopeEntitlement = vi.fn()
     const input = {
-      resourceServerId: 'resource-1',
-      scope: 'projects:write',
-      authorizationDetails: [],
+      resource: resource().resourceUrl,
+      scopes: ['projects:write'],
       mode: 'persistent' as const,
     }
     await expect(createAgentPermission(deps, 'identity-1', input, 'another-user')).rejects.toThrow('Agent controller')
@@ -121,66 +120,117 @@ describe('external API resource authorization', () => {
     expect(deps.authorization.createScopeEntitlement).not.toHaveBeenCalled()
   })
 
-  it('[spec: agent-identity/direct-agent-permission] lists native Contexts for the owning controller', async () => {
+  it('[spec: agent-identity/direct-agent-permission] resolves the native user or verified Organization Context internally', async () => {
     const deps = createTestDeps()
     authorizationDeps(deps)
-    deps.authorization.findResourceByResourceUrl = vi.fn().mockResolvedValue(nativeResource())
-    vi.mocked(deps.agentIdentities.findIdentity).mockResolvedValue(identityAggregate())
-    const result = await listAgentPermissionContexts(deps, 'identity-1', nativeResource().resourceUrl, 'user-1', {
-      limit: 1,
-      offset: 0,
+    vi.mocked(deps.authorization.findResourceByResourceUrl).mockResolvedValue({
+      ...nativeResource(),
+      scopeRegistry: {
+        ...nativeResource().scopeRegistry!,
+        scopes: resourceScopeValues.map((value) => ({ value, description: null, grantMode: 'automatic' as const })),
+      },
     })
-    expect(result.resourceServerId).toBe('resource-1')
-    expect(result.items).toHaveLength(1)
-    expect(result.items[0]).toMatchObject({ id: 'user-1', authorizationDetail: userAuthority })
-    await expect(
-      listAgentPermissionContexts(deps, 'identity-1', nativeResource().resourceUrl, 'another-user', {
-        limit: 1,
-        offset: 0,
-      }),
-    ).rejects.toThrow('Agent controller')
+    vi.mocked(deps.agentIdentities.findIdentity).mockResolvedValue(identityAggregate())
+    deps.authorization.createScopeEntitlement = vi.fn(async (record) => record)
+    const input = { resource: nativeResource().resourceUrl, scopes: ['projects:read'], mode: 'persistent' as const }
+    deps.authorization.findOrganization = vi
+      .fn()
+      .mockResolvedValue({ id: 'org-1', name: 'Organization', disabled: false })
+    const personal = await createAgentPermission(deps, 'identity-1', input, 'user-1')
+    expect(personal[0]?.authorizationDetails).toEqual([userAuthority])
+    const organization = await createAgentPermission(deps, 'identity-1', input, 'user-1', 'org-1')
+    expect(organization[0]?.authorizationDetails).toEqual([organizationAuthority])
     vi.mocked(deps.authorization.findResourceByResourceUrl).mockResolvedValue(null)
-    await expect(
-      listAgentPermissionContexts(deps, 'identity-1', 'https://unknown.test', 'user-1', { limit: 1, offset: 0 }),
-    ).rejects.toThrow('Resource Server')
+    await expect(createAgentPermission(deps, 'identity-1', input, 'user-1')).rejects.toThrow('Resource Server')
   })
 
-  it('[spec: agent-identity/direct-agent-permission] reads the connected external Context catalog and reports missing connections', async () => {
-    const deps = authorizationCatalogDeps({ providerMetadata: metadata() })
-    deps.authorization.findResourceByResourceUrl = vi.fn().mockResolvedValue(resource())
-    const result = await listAgentPermissionContexts(deps, 'identity-1', resource().resourceUrl, 'user-1', {
-      limit: 100,
-      offset: 0,
-    })
-    expect(result).toMatchObject({ resourceServerId: 'resource-1', items: [] })
+  it('[spec: agent-identity/direct-agent-permission] reports a missing connection and inactive Agent without writing', async () => {
+    const deps = createTestDeps()
+    authorizationDeps(deps)
+    vi.mocked(deps.authorization.findResourceByResourceUrl).mockResolvedValue(resource())
+    vi.mocked(deps.agentIdentities.findIdentity).mockResolvedValue(identityAggregate())
+    deps.authorization.createScopeEntitlement = vi.fn()
+    const input = { resource: resource().resourceUrl, scopes: ['projects:read'], mode: 'persistent' as const }
     vi.mocked(deps.externalResources.findConnectionByOwnerResource).mockResolvedValue(null)
-    await expect(
-      listAgentPermissionContexts(deps, 'identity-1', resource().resourceUrl, 'user-1', { limit: 100, offset: 0 }),
-    ).rejects.toThrow('must connect')
+    await expect(createAgentPermission(deps, 'identity-1', input, 'user-1')).rejects.toThrow('must connect')
+    vi.mocked(deps.externalResources.findConnectionByOwnerResource).mockResolvedValue(connectionRecord())
     const inactive = identityAggregate()
     inactive.identity.status = 'inactive'
     vi.mocked(deps.agentIdentities.findIdentity).mockResolvedValue(inactive)
-    await expect(
-      listAgentPermissionContexts(deps, 'identity-1', resource().resourceUrl, 'user-1', { limit: 100, offset: 0 }),
-    ).rejects.toThrow('Active Agent')
+    await expect(createAgentPermission(deps, 'identity-1', input, 'user-1')).rejects.toThrow('Active Agent')
+    expect(deps.authorization.createScopeEntitlement).not.toHaveBeenCalled()
+  })
+
+  it('[spec: agent-identity/direct-agent-permission] resolves all catalog pages and validates every Context before writing', async () => {
+    const deps = authorizationCatalogDeps({
+      grantedScopes: ['projects:read', 'projects:write', 'authorization-details:read'],
+    })
+    const template = { type: 'project_access', actions: ['read'] }
+    const details = Array.from({ length: 101 }, (_, index) => ({ ...template, identifier: `project-${index}` }))
+    vi.mocked(deps.authorization.findResourceByResourceUrl).mockResolvedValue({
+      ...resource(),
+      authorizationDetails: [template],
+    })
+    const connection = {
+      ...connectionRecord(),
+      grantedScopes: ['projects:read', 'projects:write', 'authorization-details:read'],
+      authorizationDetails: details,
+    }
+    vi.mocked(deps.externalResources.findConnectionByOwnerResource).mockResolvedValue(connection)
+    vi.mocked(deps.externalResources.findConnection).mockResolvedValue(connection)
+    let empty = false
+    let lastContextScopes = ['projects:read', 'projects:write']
+    vi.mocked(deps.externalHttp.fetch).mockImplementation(async (request) => {
+      const page = Number(new URL(request.url).searchParams.get('page') ?? 1)
+      return Response.json({
+        items: empty
+          ? []
+          : details.slice((page - 1) * 100, page * 100).map((authorizationDetail) => ({
+              authorizationDetail,
+              grantedScopes:
+                authorizationDetail.identifier === 'project-100'
+                  ? lastContextScopes
+                  : ['projects:read', 'projects:write'],
+              display: { label: authorizationDetail.identifier },
+            })),
+        pagination: { page, pageSize: 100, totalItems: empty ? 0 : 101, totalPages: empty ? 0 : 2 },
+      })
+    })
+    deps.authorization.createScopeEntitlement = vi.fn(async (record) => record)
+    const input = {
+      resource: resource().resourceUrl,
+      scopes: ['projects:read', 'projects:write', 'projects:read'],
+      mode: 'persistent' as const,
+    }
+    const result = await createAgentPermission(deps, 'identity-1', input, 'user-1')
+    expect(result).toHaveLength(202)
+    expect(result.at(-1)).toMatchObject({ scope: 'projects:write', authorizationDetails: [details[100]] })
+    vi.mocked(deps.authorization.createScopeEntitlement).mockClear()
+    lastContextScopes = ['projects:read']
+    await expect(createAgentPermission(deps, 'identity-1', input, 'user-1')).rejects.toThrow('connected account')
+    expect(deps.authorization.createScopeEntitlement).not.toHaveBeenCalled()
+    empty = true
+    await expect(createAgentPermission(deps, 'identity-1', input, 'user-1')).rejects.toThrow(
+      'no available authorization Contexts',
+    )
+    expect(deps.authorization.createScopeEntitlement).not.toHaveBeenCalled()
   })
 
   it('[spec: agent-identity/direct-agent-permission] grants a time-limited permission and rejects an already expired lifetime', async () => {
     const deps = createTestDeps()
     authorizationDeps(deps)
+    vi.mocked(deps.authorization.findResourceByResourceUrl).mockResolvedValue(resource())
     vi.mocked(deps.agentIdentities.findIdentity).mockResolvedValue(identityAggregate())
     vi.mocked(deps.externalResources.findConnectionByOwnerResource).mockResolvedValue(connectionRecord())
     vi.mocked(deps.externalResources.findConnection).mockResolvedValue(connectionRecord())
     deps.authorization.createScopeEntitlement = vi.fn(async (record) => record)
     const input = {
-      resourceServerId: 'resource-1',
-      accountConnectionId: 'connection-1',
-      scope: 'projects:read',
-      authorizationDetails: [],
+      resource: resource().resourceUrl,
+      scopes: ['projects:read'],
       mode: 'until' as const,
       expiresAt: '2030-01-01T00:00:00.000Z',
     }
-    expect(await createAgentPermission(deps, 'identity-1', input, 'user-1')).toMatchObject({
+    expect((await createAgentPermission(deps, 'identity-1', input, 'user-1'))[0]).toMatchObject({
       mode: 'until',
       expiresAt: input.expiresAt,
     })

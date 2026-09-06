@@ -163,10 +163,8 @@ const managementAgentResourceSchema = z.object({
 })
 export const createAgentPermissionSchema = z
   .object({
-    resourceServerId: nonEmptyString,
-    accountConnectionId: nonEmptyString.optional(),
-    scope: nonEmptyString,
-    authorizationDetails: authorizationDetailsSchema,
+    resource: z.url(),
+    scopes: z.array(nonEmptyString).min(1),
     mode: z.enum(['persistent', 'until']),
     expiresAt: z.iso.datetime().optional(),
   })
@@ -199,6 +197,8 @@ export const agentPermissionSchema = z.object({
   updatedAt: z.iso.datetime(),
   links: z.object({ self: z.string() }),
 })
+export const createdAgentPermissionsResponseSchema = z.object({ items: z.array(agentPermissionSchema) })
+
 export const agentPermissionsResponseSchema = z.object({
   items: z.array(agentPermissionSchema),
   pagination: paginationMetadataSchema,
@@ -521,10 +521,6 @@ export type CreateAccessRequest = z.input<typeof createAccessRequestSchema>
 export type AccessRequest = z.infer<typeof accessRequestSchema>
 export type AccessRequestApproval = z.infer<typeof accessRequestApprovalSchema>
 export type DecideAccessRequest = z.input<typeof decideAccessRequestSchema>
-export const agentPermissionContextsQuerySchema = paginationQuerySchema.extend({ resource: z.url() })
-export const agentPermissionContextsResponseSchema = resourceServerAuthorizationDetailsResponseSchema.extend({
-  resourceServerId: nonEmptyString,
-})
 
 export type AgentPermission = z.infer<typeof agentPermissionSchema>
 export type ResourceServer = z.infer<typeof resourceServerSchema>

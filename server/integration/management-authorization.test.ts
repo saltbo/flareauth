@@ -82,17 +82,20 @@ describe('authorization management over real D1', () => {
       updatedAt: now,
     })
     const input = {
-      resourceServerId: realmrootResourceServerId,
-      scope: 'agents:read',
+      resource: 'http://localhost/api',
+      scopes: ['agents:read'],
       mode: 'persistent',
-      authorizationDetails: [{ type: 'realmroot_authority', authority: 'user', id: admin!.id }],
     }
     const [first, replay] = await Promise.all([
       postJson(harness, cookie, '/api/agents/direct-identity/permissions', input),
       postJson(harness, cookie, '/api/agents/direct-identity/permissions', input),
     ])
-    const permission = (await first.json()) as { id: string }
-    expect(await replay.json()).toMatchObject({ id: permission.id, sourceAccessRequestId: null, status: 'active' })
+    const {
+      items: [permission],
+    } = (await first.json()) as { items: { id: string }[] }
+    expect(await replay.json()).toMatchObject({
+      items: [{ id: permission!.id, sourceAccessRequestId: null, status: 'active' }],
+    })
     expect(
       await harness.db
         .select()
