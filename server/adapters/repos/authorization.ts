@@ -1060,7 +1060,10 @@ function activeEquivalentEntitlement(input: ResourceScopeEntitlementRecord) {
     input.connectionId
       ? eq(resourceScopeEntitlement.connectionId, input.connectionId)
       : isNull(resourceScopeEntitlement.connectionId),
-    sql`${resourceScopeEntitlement.authorizationDetails} = ${JSON.stringify(input.authorizationDetails)}`,
+    or(
+      eq(resourceScopeEntitlement.authorizationContextHash, input.authorizationContextHash),
+      sql`${resourceScopeEntitlement.authorizationDetails} = ${JSON.stringify(input.authorizationDetails)}`,
+    ),
     eq(resourceScopeEntitlement.scope, input.scope),
     isNull(resourceScopeEntitlement.endedAt),
   )

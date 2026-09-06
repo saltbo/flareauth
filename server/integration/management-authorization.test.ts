@@ -103,6 +103,24 @@ describe('authorization management over real D1', () => {
         .where(eq(resourceScopeEntitlement.agentIdentityId, 'direct-identity')),
     ).toHaveLength(1)
     expect(await harness.db.select().from(agentAccessRequest)).toHaveLength(0)
+    const existing = await harness.db.query.resourceScopeEntitlement.findFirst({
+      where: eq(resourceScopeEntitlement.id, permission!.id),
+    })
+    const reordered = existing!.authorizationDetails.map((detail) =>
+      Object.fromEntries(Object.entries(detail).reverse()),
+    ) as NonNullable<typeof existing>['authorizationDetails']
+    await harness.db
+      .update(resourceScopeEntitlement)
+      .set({ authorizationDetails: reordered })
+      .where(eq(resourceScopeEntitlement.id, permission!.id))
+    const reorderedReplay = await postJson(harness, cookie, '/api/agents/direct-identity/permissions', input)
+    expect(await reorderedReplay.json()).toMatchObject({ items: [{ id: permission!.id, status: 'active' }] })
+    expect(
+      await harness.db
+        .select()
+        .from(resourceScopeEntitlement)
+        .where(eq(resourceScopeEntitlement.agentIdentityId, 'direct-identity')),
+    ).toHaveLength(1)
     const anonymous = await harness.request('/api/agents/direct-identity/permissions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
