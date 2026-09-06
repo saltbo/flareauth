@@ -700,3 +700,4 @@ Feature: Agent identity and delegated API authorization
     Then both responses identify the same persistent permission without an access request
     And anonymous and other-user writes are rejected
     And invalid permission bodies are rejected
+    And equivalent Contexts reuse existing permissions regardless of JSON object key order
