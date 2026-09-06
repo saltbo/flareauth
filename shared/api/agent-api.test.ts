@@ -68,9 +68,13 @@ describe('Create Agent public JWK contract', () => {
 })
 
 describe('Direct Agent permission lifetime contract', () => {
-  const input = { resourceServerId: 'resource-1', scope: 'projects:read', authorizationDetails: [] }
+  const input = { resource: 'https://projects.example.com/api', scopes: ['projects:read'] }
   it('[spec: agent-identity/direct-agent-permission] validates persistent and until lifetimes', () => {
     expect(createAgentPermissionSchema.safeParse({ ...input, mode: 'persistent' }).success).toBe(true)
+    expect(createAgentPermissionSchema.safeParse({ ...input, scopes: [], mode: 'persistent' }).success).toBe(false)
+    expect(
+      createAgentPermissionSchema.safeParse({ ...input, authorizationDetails: [], mode: 'persistent' }).success,
+    ).toBe(false)
     expect(
       createAgentPermissionSchema.safeParse({ ...input, mode: 'until', expiresAt: '2030-01-01T00:00:00Z' }).success,
     ).toBe(true)

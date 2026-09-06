@@ -4,7 +4,11 @@ import type { ProtocolAgentSession } from '@server/usecases/agent-session'
 import type { Deps } from '@server/usecases/deps'
 import { validateDpopResourceProof } from '@server/usecases/dpop'
 import type { AgentIdentityBindingRecord, AgentIdentityRecord } from '@server/usecases/ports'
-import { type RealmrootAgentBindingClaim, realmrootCliClientId } from '@shared/oauth-token-profile'
+import {
+  type RealmrootAgentBindingClaim,
+  realmrootCliClientId,
+  realmrootOrganizationClaim,
+} from '@shared/oauth-token-profile'
 import type { Context, MiddlewareHandler } from 'hono'
 import { readRealmrootAgentBinding } from '../agent-token-claims'
 import { toBoundaryError } from '../routes/auth-api'
@@ -35,6 +39,7 @@ export interface PrincipalContext {
     id: string
     clientId: string
     ownerOrganizationId: string
+    delegatedOrganizationId?: string | null
     scopes: string[]
   } | null
   agent?: {
@@ -197,6 +202,7 @@ async function authenticateOAuthApplication(
       id: application.id,
       clientId: application.clientId,
       ownerOrganizationId: application.ownerOrganizationId,
+      delegatedOrganizationId: stringClaim(payload, realmrootOrganizationClaim),
       scopes: scopeClaim(payload),
     },
     user: representedUser

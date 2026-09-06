@@ -1302,6 +1302,7 @@ async function validateAgentPermissionTarget(
   input: { agentIdentityId: string; scopes: string[]; connectionId: string | null },
   authorizationDetails: AuthorizationDetail[],
   actorUserId: string,
+  resolvedAccountScopes?: string[],
 ) {
   validateResourceRequestedScopes(resource, input.scopes)
   const requestIdentity = await deps.agentIdentities.findIdentity(input.agentIdentityId)
@@ -1338,7 +1339,8 @@ async function validateAgentPermissionTarget(
     assertAuthorizationDetailsSelection(resource, connection, authorizationDetails)
     assertAuthorizationDetailsSubset(authorizationDetails, connection.authorizationDetails, 'connected account')
     const contextualScopes =
-      authorizationDetails.length > 0
+      resolvedAccountScopes ??
+      (authorizationDetails.length > 0
         ? await accountScopesForAuthorizationDetails(
             deps,
             resource,
@@ -1346,7 +1348,7 @@ async function validateAgentPermissionTarget(
             input.agentIdentityId,
             authorizationDetails,
           )
-        : null
+        : null)
     assertScopeSubset(input.scopes, contextualScopes ?? connection.grantedScopes, 'connected account')
   } else if (connectionId) {
     throw badRequest('Native API resources do not use account connections.')
@@ -1361,86 +1363,99 @@ export async function createAgentPermission(
   agentId: string,
   input: CreateAgentPermission,
   actorUserId: string,
+  organizationId: string | null = null,
 ) {
   if (!(await controlsAgentIdentity(deps, agentId, actorUserId)))
     throw forbidden('Agent controller access is required.')
-  const resource = await requireEnabledResource(deps, input.resourceServerId)
-  const { connectionId } = await validateAgentPermissionTarget(
-    deps,
-    resource,
-    {
-      agentIdentityId: agentId,
-      scopes: [input.scope],
-      connectionId: input.accountConnectionId ?? null,
-    },
-    input.authorizationDetails,
-    actorUserId,
-  )
+  const resource = await deps.authorization.findResourceByResourceUrl(input.resource)
+  if (!resource?.enabled) throw notFound('Enabled Resource Server was not found.')
+  const scopes = [...new Set(input.scopes)]
   const now = new Date()
   const expiresAt = input.mode === 'until' ? new Date(input.expiresAt!) : null
   if (expiresAt && expiresAt.getTime() <= now.getTime()) throw badRequest('Permission expiry must be in the future.')
-  const entitlement = await deps.authorization.createScopeEntitlement(
-    {
-      id: deps.ids.generate(),
-      userId: null,
-      applicationId: null,
-      agentIdentityId: agentId,
-      organizationId: null,
-      resourceServerId: resource.id,
-      connectionId,
-      authorizationDetails: input.authorizationDetails,
-      authorizationContextHash: await sha256(canonicalJson(input.authorizationDetails)),
-      scope: input.scope,
-      mode: input.mode,
-      grantedByUserId: actorUserId,
-      grantedByAgentIdentityId: null,
-      sourceAccessRequestId: null,
-      expiresAt,
-      endedAt: null,
-      endReason: null,
-      createdAt: now,
-      updatedAt: now,
-    },
-    now,
-  )
-  return toPermission(entitlement, resource)
-}
-
-export async function listAgentPermissionContexts(
-  deps: Deps,
-  agentId: string,
-  resourceUrl: string,
-  actorUserId: string,
-  pagination: PaginationInput,
-) {
-  if (!(await controlsAgentIdentity(deps, agentId, actorUserId)))
-    throw forbidden('Agent controller access is required.')
-  const identity = await deps.agentIdentities.findIdentity(agentId)
-  if (!identity || identity.identity.status !== 'active') throw notFound('Active Agent identity was not found.')
-  const resource = await deps.authorization.findResourceByResourceUrl(resourceUrl)
-  if (!resource?.enabled) throw notFound('Enabled Resource Server was not found.')
-  await requireAgentResourceVisibility(deps, resource, identity.identity)
-  if (!requiresAccountConnection(resource)) {
-    const items = await nativeAuthorityDetailsCatalog(deps, identity, agentId, resource)
-    return {
-      resourceServerId: resource.id,
-      items: items.slice(pagination.offset, pagination.offset + pagination.limit),
-      pagination: paginationMetadata({ ...pagination, total: items.length }),
+  const selections: Array<{ authorizationDetails: AuthorizationDetail[]; grantedScopes?: string[] }> = []
+  let connectionId: string | null = null
+  if (requiresAccountConnection(resource)) {
+    const connection = await deps.externalResources.findConnectionByOwnerResource({
+      resourceId: resource.id,
+      ownerUserId: actorUserId,
+      ownerOrganizationId: null,
+    })
+    if (!connection || connection.status !== 'active')
+      throw badRequest('The controller must connect the external resource account before granting Agent permissions.')
+    connectionId = connection.id
+    if (resource.authorizationDetails.length === 0) {
+      selections.push({ authorizationDetails: [] })
+    } else {
+      for (let page = 1; ; page += 1) {
+        const catalog = await readResourceCatalog(deps, resource, connection, agentId, {
+          limit: 100,
+          offset: (page - 1) * 100,
+        })
+        for (const item of catalog.items)
+          selections.push({ authorizationDetails: [item.authorizationDetail], grantedScopes: item.grantedScopes })
+        if (catalog.pagination.page >= catalog.pagination.totalPages) break
+      }
+      if (selections.length === 0) throw badRequest('The connected account has no available authorization Contexts.')
+    }
+  } else {
+    selections.push({
+      authorizationDetails: [
+        {
+          type: 'realmroot_authority',
+          authority: organizationId ? 'organization' : 'user',
+          id: organizationId ?? actorUserId,
+        },
+      ],
+    })
+  }
+  // Resolve and validate every Context before writing any of this resource's grants.
+  for (const selection of selections) {
+    await validateAgentPermissionTarget(
+      deps,
+      resource,
+      {
+        agentIdentityId: agentId,
+        scopes,
+        connectionId,
+      },
+      selection.authorizationDetails,
+      actorUserId,
+      selection.grantedScopes,
+    )
+  }
+  const permissions = []
+  for (const { authorizationDetails } of selections) {
+    const authorizationContextHash = await sha256(canonicalJson(authorizationDetails))
+    for (const scope of scopes) {
+      const entitlement = await deps.authorization.createScopeEntitlement(
+        {
+          id: deps.ids.generate(),
+          userId: null,
+          applicationId: null,
+          agentIdentityId: agentId,
+          organizationId: null,
+          resourceServerId: resource.id,
+          connectionId,
+          authorizationDetails,
+          authorizationContextHash,
+          scope,
+          mode: input.mode,
+          grantedByUserId: actorUserId,
+          grantedByAgentIdentityId: null,
+          sourceAccessRequestId: null,
+          expiresAt,
+          endedAt: null,
+          endReason: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+        now,
+      )
+      permissions.push(toPermission(entitlement, resource))
     }
   }
-  const connection = await deps.externalResources.findConnectionByOwnerResource({
-    resourceId: resource.id,
-    ownerUserId: identity.identity.ownerUserId,
-    ownerOrganizationId: null,
-  })
-  if (!connection || connection.status !== 'active')
-    throw badRequest('The controller must connect the external resource account before granting Agent permissions.')
-  const catalog = await readResourceCatalog(deps, resource, connection, agentId, pagination)
-  return {
-    resourceServerId: resource.id,
-    items: catalog.items.map(toResourceServerAuthorizationDetail),
-    pagination: catalog.pagination,
-  }
+  return permissions
 }
 
 export async function decideAgentAccessRequest(
