@@ -1302,6 +1302,7 @@ async function validateAgentPermissionTarget(
   input: { agentIdentityId: string; scopes: string[]; connectionId: string | null },
   authorizationDetails: AuthorizationDetail[],
   actorUserId: string,
+  resolvedAccountScopes?: string[],
 ) {
   validateResourceRequestedScopes(resource, input.scopes)
   const requestIdentity = await deps.agentIdentities.findIdentity(input.agentIdentityId)
@@ -1338,7 +1339,8 @@ async function validateAgentPermissionTarget(
     assertAuthorizationDetailsSelection(resource, connection, authorizationDetails)
     assertAuthorizationDetailsSubset(authorizationDetails, connection.authorizationDetails, 'connected account')
     const contextualScopes =
-      authorizationDetails.length > 0
+      resolvedAccountScopes ??
+      (authorizationDetails.length > 0
         ? await accountScopesForAuthorizationDetails(
             deps,
             resource,
@@ -1346,7 +1348,7 @@ async function validateAgentPermissionTarget(
             input.agentIdentityId,
             authorizationDetails,
           )
-        : null
+        : null)
     assertScopeSubset(input.scopes, contextualScopes ?? connection.grantedScopes, 'connected account')
   } else if (connectionId) {
     throw badRequest('Native API resources do not use account connections.')
@@ -1371,7 +1373,7 @@ export async function createAgentPermission(
   const now = new Date()
   const expiresAt = input.mode === 'until' ? new Date(input.expiresAt!) : null
   if (expiresAt && expiresAt.getTime() <= now.getTime()) throw badRequest('Permission expiry must be in the future.')
-  const selections: AuthorizationDetail[][] = []
+  const selections: Array<{ authorizationDetails: AuthorizationDetail[]; grantedScopes?: string[] }> = []
   let connectionId: string | null = null
   if (requiresAccountConnection(resource)) {
     const connection = await deps.externalResources.findConnectionByOwnerResource({
@@ -1383,29 +1385,32 @@ export async function createAgentPermission(
       throw badRequest('The controller must connect the external resource account before granting Agent permissions.')
     connectionId = connection.id
     if (resource.authorizationDetails.length === 0) {
-      selections.push([])
+      selections.push({ authorizationDetails: [] })
     } else {
       for (let page = 1; ; page += 1) {
         const catalog = await readResourceCatalog(deps, resource, connection, agentId, {
           limit: 100,
           offset: (page - 1) * 100,
         })
-        for (const item of catalog.items) selections.push([item.authorizationDetail])
+        for (const item of catalog.items)
+          selections.push({ authorizationDetails: [item.authorizationDetail], grantedScopes: item.grantedScopes })
         if (catalog.pagination.page >= catalog.pagination.totalPages) break
       }
       if (selections.length === 0) throw badRequest('The connected account has no available authorization Contexts.')
     }
   } else {
-    selections.push([
-      {
-        type: 'realmroot_authority',
-        authority: organizationId ? 'organization' : 'user',
-        id: organizationId ?? actorUserId,
-      },
-    ])
+    selections.push({
+      authorizationDetails: [
+        {
+          type: 'realmroot_authority',
+          authority: organizationId ? 'organization' : 'user',
+          id: organizationId ?? actorUserId,
+        },
+      ],
+    })
   }
   // Resolve and validate every Context before writing any of this resource's grants.
-  for (const details of selections) {
+  for (const selection of selections) {
     await validateAgentPermissionTarget(
       deps,
       resource,
@@ -1414,12 +1419,13 @@ export async function createAgentPermission(
         scopes,
         connectionId,
       },
-      details,
+      selection.authorizationDetails,
       actorUserId,
+      selection.grantedScopes,
     )
   }
   const permissions = []
-  for (const authorizationDetails of selections) {
+  for (const { authorizationDetails } of selections) {
     const authorizationContextHash = await sha256(canonicalJson(authorizationDetails))
     for (const scope of scopes) {
       const entitlement = await deps.authorization.createScopeEntitlement(

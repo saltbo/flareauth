@@ -204,6 +204,7 @@ describe('external API resource authorization', () => {
     }
     const result = await createAgentPermission(deps, 'identity-1', input, 'user-1')
     expect(result).toHaveLength(202)
+    expect(deps.externalHttp.fetch).toHaveBeenCalledTimes(2)
     expect(result.at(-1)).toMatchObject({ scope: 'projects:write', authorizationDetails: [details[100]] })
     vi.mocked(deps.authorization.createScopeEntitlement).mockClear()
     lastContextScopes = ['projects:read']
